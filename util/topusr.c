@@ -23,8 +23,7 @@ int num;
 FILE *fp;
 
 
-void
- top(type)
+void top(int type)
 {
     static char *str_type[TYPE_COUNT] =
     {"發表次數", " 大富翁 "};
