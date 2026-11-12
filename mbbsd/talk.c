@@ -2251,6 +2251,11 @@ userlist(void)
 	    case 'H':
 		if (HasUserPerm(PERM_SYSOP)||HasUserPerm(PERM_OLDSYSOP)) {
 		    currutmp->userlevel ^= PERM_SYSOPHIDE;
+		    // MilkTea: save to .PASSWDS so the state survives logout
+		    if (currutmp->userlevel & PERM_SYSOPHIDE)
+		        pwcuBitEnableLevel(PERM_SYSOPHIDE);
+		    else
+		        pwcuBitDisableLevel(PERM_SYSOPHIDE);
 		    redrawall = redraw = 1;
 		}
 		break;
