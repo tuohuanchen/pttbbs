@@ -428,8 +428,9 @@ int IsFreeBoardName(const char *brdname)
 	return 1;
     // since DEFAULT_BOARD is allowed to post without
     // special permission, we should not give rewards.
-    // SYSOP board: only SYSOP-permission accounts get rewards.
-    if (strcasecmp(brdname, DEFAULT_BOARD) == 0 && !HasUserPerm(PERM_SYSOP))
+    // SYSOP board: only SYSOP / retired-SYSOP accounts get rewards.
+    if (strcasecmp(brdname, DEFAULT_BOARD) == 0 &&
+	!HasUserPerm(PERM_SYSOP | PERM_OLDSYSOP))
 	return 1;
     return 0;
 }
