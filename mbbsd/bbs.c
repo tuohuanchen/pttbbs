@@ -428,7 +428,8 @@ int IsFreeBoardName(const char *brdname)
 	return 1;
     // since DEFAULT_BOARD is allowed to post without
     // special permission, we should not give rewards.
-    if (strcasecmp(brdname, DEFAULT_BOARD) == 0)
+    // SYSOP board: only SYSOP-permission accounts get rewards.
+    if (strcasecmp(brdname, DEFAULT_BOARD) == 0 && !HasUserPerm(PERM_SYSOP))
 	return 1;
     return 0;
 }
@@ -3488,7 +3489,10 @@ del_post(int ent, fileheader_t * fhdr, char *direct)
         // INVALIDMONEY_MODES (FILE_BID, FILE_ANONYMOUS, ...) 也都不用扣
         // also check MAX_POST_MONEY in case any error made bad money...
         if (del_fee < 0 ||
-            IsFreeBoardName(currboard) ||
+            // refund is decided by the money recorded in the header (0 for
+            // non-SYSOP posts on SYSOP board), not by who is deleting.
+            strcmp(currboard, BN_TEST) == 0 ||
+            strcmp(currboard, BN_ALLPOST) == 0 ||
             (currbrdattr & BRD_NOCREDIT) ||
             (currmode & MODE_DIGEST) ||
             (fhdr->filemode & INVALIDMONEY_MODES) ||
