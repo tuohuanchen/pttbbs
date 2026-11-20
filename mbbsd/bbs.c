@@ -2582,8 +2582,7 @@ b_man(void)
 	    close(fd);
     }
 
-    return a_menu(currboard, apath,HasUserPerm(PERM_BOARD) ? 2 :
-		  (currmode & MODE_BOARD ? 1 : 0),
+    return a_menu(currboard, apath, a_board_level(currbid),
 		  currbid, // getbnum(currboard)?
 		  NULL, backup_path);
 }

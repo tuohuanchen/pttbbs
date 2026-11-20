@@ -54,6 +54,7 @@ void pressanykey_or_callangel(void);
 #endif
 
 /* announce */
+int a_board_level(int bid);
 int a_menu(const char *maintitle, const char *path, int lastlevel, int lastbid,
            char *trans_buffer, const char *backup_dir);
 void a_copyitem(const char* fpath, const char* title, const char* owner, int mode);

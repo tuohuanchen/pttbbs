@@ -2173,7 +2173,7 @@ mail_cite(int ent GCC_UNUSED, fileheader_t * fhdr, const char *direct GCC_UNUSED
 	    setutmpmode(ANNOUNCE);
             // TODO what's the backup_path here?
 	    a_menu(xboard, fpath,
-		   HasUserPerm(PERM_BOARD) ? 2 : is_BM_cache(bid) ? 1 : 0,
+		   a_board_level(bid),
 		   bid, NULL, backup_path);
 	} else {
 	    mail_man();

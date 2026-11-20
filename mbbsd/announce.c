@@ -222,6 +222,9 @@ a_showmenu(menu_t * pm)
     if (!pm->num)
     {
 	outs("\n  《精華區》尚在吸取天地間的日月精華中... :)");
+	if (pm->bid > 0)
+	    outs("\n\n   " ANSI_COLOR(1;33) "【公告】自 2026/11/20 起，僅「語言」「魔法」群組看板的板主可編輯精華區，" ANSI_RESET
+		 "\n   " ANSI_COLOR(1;33) "其餘看板由站長維護；精華區仍可照常閱\讀。" ANSI_RESET);
     }
     else
     {
@@ -311,6 +314,40 @@ a_searchtitle(menu_t * pm, int rev)
 enum {
     NOBODY, MANAGER, SYSOP
 };
+
+/* MilkTea: only boards inside these special groups let their BM edit the
+ * Gem (a_menu); everywhere else only SYSOP can. Matched by board name,
+ * walking up the gid chain, so boards added later are covered. */
+static const char * const gem_edit_groups[] = { "E_Language", "H_Group", NULL };
+
+static int
+a_in_gem_group(int bid)
+{
+    int depth, i;
+
+    for (depth = 0; bid > 0 && bid <= MAX_BOARD && depth < 8; depth++) {
+	const boardheader_t *bp = getbcache(bid);
+	for (i = 0; gem_edit_groups[i]; i++)
+	    if (strcasecmp(bp->brdname, gem_edit_groups[i]) == 0)
+		return 1;
+	if (bp->gid == bid)
+	    break;
+	bid = bp->gid;
+    }
+    return 0;
+}
+
+/* edit level of the current user in board bid's Gem */
+int
+a_board_level(int bid)
+{
+    if (HasUserPerm(PERM_SYSOP))
+	return SYSOP;
+    if (bid > 0 && bid <= MAX_BOARD && a_in_gem_group(bid) &&
+	(HasUserPerm(PERM_BOARD) || is_BM_cache(bid)))
+	return MANAGER;
+    return NOBODY;
+}
 
 static void
 a_showhelp(int level)
@@ -1288,7 +1325,7 @@ a_menu_rec(const char *maintitle, const char *path,
 	// such extra behavior will result in any sub-op to have PERM_BM
 	// ability, which leads to entering BM board without authority.
 	// Thanks to mtdas@ptt for reporting this exploit.
-	if (HasBasicUserPerm(PERM_LOGINOK) &&
+	if (lastbid == 0 && HasBasicUserPerm(PERM_LOGINOK) &&
             !HasUserPerm(PERM_NOCITIZEN) &&
             (ptr = strrchr(me.mtitle, '[')))
 	    me.level = is_uBM(ptr + 1, cuser.userid);
