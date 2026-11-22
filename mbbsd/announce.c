@@ -222,9 +222,11 @@ a_showmenu(menu_t * pm)
     if (!pm->num)
     {
 	outs("\n  《精華區》尚在吸取天地間的日月精華中... :)");
+#if 0 /* MilkTea: gem-edit notice disabled (too noisy) */
 	if (pm->bid > 0)
 	    outs("\n\n   " ANSI_COLOR(1;33) "【公告】自 2026/11/20 起，僅「語言」「魔法」群組看板的板主可編輯精華區，" ANSI_RESET
 		 "\n   " ANSI_COLOR(1;33) "其餘看板由站長維護；精華區仍可照常閱\讀。" ANSI_RESET);
+#endif
     }
     else
     {
