@@ -3,6 +3,7 @@
 #define NUM_KINDS   15		/* 有多少種動物 */
 #define CHICKENLOG  "etc/chicken"
 #define CHICKEN_PIC "etc/chickens"
+#define FN_CHICKEN_LAST "chicken.last"  /* MilkTea: pet as owner last saw it */
 
 static const char * const cage[17] = {
     "誕生", "週歲", "幼年", "少年", "青春", "青年",
@@ -111,6 +112,50 @@ free_live_chicken(chicken_t *p)
 {
     if (!p) return;
     munmap(p, sizeof(chicken_t));
+}
+
+/* MilkTea: remember the pet as the owner last saw it (called when leaving). */
+static void
+save_last_seen(const char *uid, const chicken_t *c)
+{
+    char fn[PATHLEN];
+    int fd;
+
+    if (!uid || !uid[0] || !c || !c->name[0]) return;
+    sethomefile(fn, uid, FN_CHICKEN_LAST);
+    fd = open(fn, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0) return;
+    if (write(fd, c, sizeof(chicken_t)) != (ssize_t)sizeof(chicken_t)) {
+	// partial write: drop it so a broken snapshot is never restored
+	close(fd);
+	unlink(fn);
+	return;
+    }
+    close(fd);
+}
+
+/* MilkTea: put the last-seen snapshot back. Returns 1 if restored. */
+static int
+restore_last_seen(const char *uid, chicken_t *cur)
+{
+    char fn[PATHLEN];
+    chicken_t last;
+    int fd, ok = 0;
+
+    if (!uid || !uid[0] || !cur) return 0;
+    sethomefile(fn, uid, FN_CHICKEN_LAST);
+    fd = open(fn, O_RDONLY);
+    if (fd < 0) return 0;
+    // must be a living pet, and the same pet (same birth time) as the dead one
+    if (read(fd, &last, sizeof(last)) == (ssize_t)sizeof(last) &&
+	last.name[0] && last.cbirth == cur->cbirth)
+	ok = 1;
+    close(fd);
+    if (!ok) return 0;
+
+    last.lastvisit = now;	// no penalty for the time spent dead
+    memcpy(cur, &last, sizeof(chicken_t));
+    return 1;
 }
 
 static int
@@ -928,6 +973,11 @@ chicken_toggle_death(const char *uid)
     }
     else
     {
+	if (restore_last_seen(uid, mychicken)) {
+	    vmsgf("%s 的寵物已回到上次看到牠的狀態", uid);
+	    free_live_chicken(mychicken);
+	    return;
+	}
 	revive_chicken(mychicken, 1);
 	strlcpy(mychicken->name, "[死]", sizeof(mychicken->name));
 	vmsgf("%s 的寵物復活了", uid);
@@ -966,6 +1016,54 @@ chicken_query(const char *userid)
 }
 
 
+/* MilkTea: SYSOP / retired SYSOP pets may be rescued from death.
+ * Goes back to the state the owner last saw alive; time since then is forgiven.
+ * Returns 1 if rescued (mychicken restored), 0 if the pet is left to die. */
+static int
+chicken_god_rescue(int cause, const chicken_t *safe, chicken_t *mychicken)
+{
+    char buf[128];
+    const char *why;
+    int ans;
+
+    switch (cause) {
+    case DEADTYPE_NOHP:
+	why = "體力用盡";
+	break;
+    case DEADTYPE_TOOTIRED:
+	why = "操勞過度";
+	break;
+    case DEADTYPE_TOOFAT:
+	why = "肥胖過度";
+	break;
+    case DEADTYPE_NOFOOD:
+	why = "餓壞了";
+	break;
+    case DEADTYPE_NOSATIS:
+	why = "太不滿意";
+	break;
+    default:
+	why = "不明原因";
+	break;
+    }
+
+    snprintf(buf, sizeof(buf), "發現 %s 導致死亡，你要動用大神的能力救回他嗎 [Y/n]", why);
+    ans = vans(buf);
+    if (ans == 'n' || ans == 'N')
+	return 0;
+
+    log_filef(CHICKENLOG, LOG_CREAT,
+	      ANSI_COLOR(31) "%s" ANSI_RESET " 動用大神的能力救回了 "
+	      ANSI_COLOR(33) "%s" ANSI_COLOR(32) " %s " ANSI_RESET
+	      "(%s) 於 %s\n", cuser.userid, safe->name,
+	      chicken_type[(int)safe->type], why, Cdate(&now));
+
+    memcpy(mychicken, safe, sizeof(chicken_t));
+    mychicken->lastvisit = now;
+    vmsg("大神出手，牠已回到你上次看到的樣子");
+    return 1;
+}
+
 #define lockreturn0(unmode, state) if(lockutmpmode(unmode, state)) return 0
 
 int
@@ -973,6 +1071,8 @@ chicken_main(void)
 {
     int age;
     chicken_t *mychicken;
+    chicken_t safe;
+    int has_safe = 0, sysop_rescue, cause;
     lockreturn0(CHICKEN, LOCK_MULTI);
     mychicken = load_live_chicken(cuser.userid);
     debug_timediff(mychicken);
@@ -1000,12 +1100,31 @@ chicken_main(void)
     }
     assert(mychicken);
     age = ((now - mychicken->cbirth) / DAY_SECONDS);
+    // MilkTea: for SYSOP / retired SYSOP keep "safe" = the last state seen
+    // alive (before the first time_diff, and again after each screen is
+    // shown, i.e. before each action). A death is undone by going back to it.
+    sysop_rescue = HasUserPerm(PERM_SYSOP | PERM_OLDSYSOP);
+    if (sysop_rescue && deadtype(mychicken, NULL) == DEADTYPE_NOTYET) {
+	memcpy(&safe, mychicken, sizeof(chicken_t));
+	has_safe = 1;
+    }
     do {
 	time_diff(mychicken);
-	if (isdeath(mychicken, mychicken))
+	if (sysop_rescue && has_safe &&
+	    (cause = deadtype(mychicken, NULL)) != DEADTYPE_NOTYET &&
+	    chicken_god_rescue(cause, &safe, mychicken)) {
+	    // rescued: mychicken is back to the safe state, show it as usual
+	} else if (isdeath(mychicken, mychicken))
 	    break;
 	show_chicken_data(mychicken);
+	if (sysop_rescue && deadtype(mychicken, NULL) == DEADTYPE_NOTYET) {
+	    memcpy(&safe, mychicken, sizeof(chicken_t));
+	    has_safe = 1;
+	}
     } while (select_menu(age, mychicken));
+    // MilkTea: leaving while alive -> remember how the owner last saw it
+    if (mychicken->name[0])
+	save_last_seen(cuser.userid, mychicken);
     unlockutmpmode();
     free_live_chicken(mychicken);
     return 0;
