@@ -1,4 +1,5 @@
 #include "bbs.h"
+#include "daemons.h"   /* LOGIN_SRC_* (MtBBS-App ticket) */
 
 #define NUM_KINDS   15		/* 有多少種動物 */
 #define CHICKENLOG  "etc/chicken"
@@ -54,6 +55,243 @@ static const short time_change[NUM_KINDS][MAX_CHANGE] =
     /* 就可 */ {1, 1,  200,  3, 50, 50, 10,  10, 2,  300},
     /* 蘿莉 */ {1, 1,   80,  2,  2,  5,  7,  12, 1,  135},
 };
+
+/* ---- MilkTea: MtBBS-App 丟球票 ----------------------------------------
+ * 只有 MtBBS-App 連線才有票；一般 telnet / gateway 完全不受影響。
+ * 票存在使用者家目錄的 chicken.ticket（key=value），不動 chicken_t。
+ * 目前只記錄，不發錢（記錄句尾標「未發放」）。
+ */
+#define FN_CHICKEN_TICKET   "chicken.ticket"
+#define CHICKEN_DAILY_QUOTA 100     /* 每天「超過支出」的淨賺上限 */
+#define TICKET_MAXVAL       100000  /* 單一次數的合理上限，防溢位 */
+
+enum { TK_NONE = 0, TK_OPEN, TK_USED, TK_VOID };
+
+typedef struct {
+    char    id[8];          /* 6 碼票號；空字串＝沒有票 */
+    int     date;           /* YYYYMMDD（伺服器時間） */
+    int     quota_used;     /* 今天已用掉的 Quota（0..100） */
+    int     visit_spent;    /* 這次進場在 App 連線裡花的錢 */
+    int     state;          /* TK_* */
+    long    start, endgame, issued;
+    int     given;          /* 實給（目前不入帳） */
+} ticket_t;
+
+static ticket_t g_ticket;
+
+static int
+ticket_active(void)
+{
+    return g_ticket.id[0] && g_ticket.state == TK_OPEN;
+}
+
+static const char * const tk_state_name[] = { "none", "open", "used", "void" };
+
+static void
+ticket_save(void)
+{
+    char fn[PATHLEN], tmp[PATHLEN];
+    FILE *fp;
+
+    setuserfile(fn, FN_CHICKEN_TICKET);
+    snprintf(tmp, sizeof(tmp), "%s.tmp", fn);
+    fp = fopen(tmp, "w");
+    if (!fp)
+	return;
+    fprintf(fp, "id=%s\ndate=%d\nquota_used=%d\nvisit_spent=%d\nstate=%s\n"
+	    "start=%ld\nendgame=%ld\nissued=%ld\ngiven=%d\n",
+	    g_ticket.id, g_ticket.date, g_ticket.quota_used,
+	    g_ticket.visit_spent, tk_state_name[g_ticket.state],
+	    g_ticket.start, g_ticket.endgame, g_ticket.issued, g_ticket.given);
+    if (fclose(fp) == 0)
+	rename(tmp, fn);
+    else
+	unlink(tmp);
+}
+
+/* 讀舊票只為了帶走「今天已用 Quota」；日期不同就歸零 */
+static int
+ticket_load_quota(int today)
+{
+    char fn[PATHLEN], line[128];
+    FILE *fp;
+    int date = 0, used = 0;
+
+    setuserfile(fn, FN_CHICKEN_TICKET);
+    fp = fopen(fn, "r");
+    if (!fp)
+	return 0;
+    while (fgets(line, sizeof(line), fp)) {
+	sscanf(line, "date=%d", &date);
+	sscanf(line, "quota_used=%d", &used);
+    }
+    fclose(fp);
+    if (date != today || used < 0)
+	return 0;
+    if (used > CHICKEN_DAILY_QUOTA)
+	used = CHICKEN_DAILY_QUOTA;
+    return used;
+}
+
+/* 進養雞場：只有 App 連線發新票 */
+static void
+ticket_issue(void)
+{
+    static const char alpha[] = "23456789ABCDEFGHJKMNPQRSTUVWXYZ";
+    struct tm tm;
+    time_t t = time(NULL);
+    int i, today;
+
+    memset(&g_ticket, 0, sizeof(g_ticket));
+    if (mbbsd_login_source() != LOGIN_SRC_APP)
+	return;
+
+    localtime_r(&t, &tm);
+    today = (tm.tm_year + 1900) * 10000 + (tm.tm_mon + 1) * 100 + tm.tm_mday;
+    srandom((unsigned int)(t ^ (getpid() << 8)));
+    for (i = 0; i < 6; i++)
+	g_ticket.id[i] = alpha[random() % (sizeof(alpha) - 1)];
+    g_ticket.id[6] = 0;
+    g_ticket.date = today;
+    g_ticket.quota_used = ticket_load_quota(today);
+    g_ticket.state = TK_OPEN;
+    ticket_save();
+}
+
+static void
+ticket_finish(int state)
+{
+    if (!g_ticket.id[0])
+	return;
+    if (g_ticket.state == TK_OPEN)
+	g_ticket.state = state;
+    ticket_save();
+    g_ticket.id[0] = 0;     /* 離開後不再顯示、不再記支出 */
+}
+
+/* 只有 chicken.c 自己扣的錢才算「支出」；只算 App 連線 */
+static int
+ch_pay(int money, const char *item)
+{
+    int r = pay(money, "%s", item);
+    if (money > 0 && r != -1 && ticket_active()) {
+	g_ticket.visit_spent += money;
+	ticket_save();
+    }
+    return r;
+}
+
+static void
+ticket_duration(char *buf, size_t sz, long sec)
+{
+    if (sec < 0)
+	sec = 0;
+    if (sec >= 60)
+	snprintf(buf, sz, "%ld 分 %ld 秒", sec / 60, sec % 60);
+    else
+	snprintf(buf, sz, "%ld 秒", sec);
+}
+
+/* 使用者離開後：停在空白輸入框等 App 回報。沒有動作就一直等。 */
+static void
+ticket_leave(const chicken_t *c)
+{
+    char buf[80], dur[40], rid[16], safe[16];
+    int a, b2, cc, d, e, f, g, amt, calc, cap, give, n, i, j;
+
+    if (!ticket_active())
+	return;
+    /* 這次沒花錢：App 不問丟球，票直接作廢 */
+    if (g_ticket.visit_spent <= 0) {
+	ticket_finish(TK_VOID);
+	return;
+    }
+
+    g_ticket.start = (long)time(NULL);
+    ticket_save();
+    move(b_lines - 3, 0);
+    clrtoeol();
+    prints("票 %s：等待 MtBBS-App 回報丟球結果（不玩請直接按 Enter）", g_ticket.id);
+    getdata(b_lines - 1, 0, "", buf, sizeof(buf), DOECHO);
+
+    if (buf[0] == 0) {              /* 不玩 */
+	ticket_finish(TK_VOID);
+	return;
+    }
+    g_ticket.endgame = (long)time(NULL);
+    if ((buf[0] == 'd' || buf[0] == 'D') && buf[1] == 0) {
+	/* d + Enter：BBS 記下 endgame，接著等「票號 金額 a/b/c,d/e/f,g」 */
+	getdata(b_lines - 1, 0, "", buf, sizeof(buf), DOECHO);
+	if (buf[0] == 0) {
+	    ticket_finish(TK_VOID);
+	    return;
+	}
+    }
+    g_ticket.issued = (long)time(NULL);
+
+    n = sscanf(buf, "%15s %d %d/%d/%d,%d/%d/%d,%d",
+	       rid, &amt, &a, &b2, &cc, &d, &e, &f, &g);
+    if (n != 9 || amt < 0 || a < 0 || b2 < 0 || cc < 0 || d < 0 || e < 0 ||
+	f < 0 || g < 0 || a > TICKET_MAXVAL || b2 > TICKET_MAXVAL ||
+	cc > TICKET_MAXVAL || d > TICKET_MAXVAL || e > TICKET_MAXVAL ||
+	f > TICKET_MAXVAL || g > TICKET_MAXVAL || amt > 100 * TICKET_MAXVAL) {
+	log_filef(CHICKENLOG, LOG_CREAT,
+		  "%s 的%s %s：回報格式不符，未發放\n",
+		  cuser.userid, chicken_type[(int)c->type], c->name);
+	ticket_finish(TK_USED);
+	return;
+    }
+
+    if (strcasecmp(rid, g_ticket.id) != 0) {
+	/* 只留英數字，避免把控制碼寫進記錄 */
+	for (i = j = 0; rid[i] && j < 7; i++)
+	    if (isalnum((unsigned char)rid[i]))
+		safe[j++] = rid[i];
+	safe[j] = 0;
+	log_filef(CHICKENLOG, LOG_CREAT,
+		  "%s 的%s %s：票號不符（收到 %s），未發放\n",
+		  cuser.userid, chicken_type[(int)c->type], c->name, safe);
+	ticket_finish(TK_USED);
+	return;
+    }
+
+    calc = a * 1 + b2 * 3 + cc * 5 + d * 1 + e * 3 + f * 15 + g * 15;
+
+    /* 回報 0 元、次數也都是 0：沒玩，不記 */
+    if (amt == 0 && calc == 0) {
+	ticket_finish(TK_VOID);
+	return;
+    }
+
+    /* 金額跟次數對不上：整筆不給 */
+    if (amt != calc) {
+	log_filef(CHICKENLOG, LOG_CREAT,
+		  "%s 的%s %s：回報 %d 元，與數據 (%d/%d/%d,%d/%d/%d,%d) 不符，次數算出 %d 元，未發放\n",
+		  cuser.userid, chicken_type[(int)c->type], c->name,
+		  amt, a, b2, cc, d, e, f, g, calc);
+	g_ticket.given = 0;
+	ticket_finish(TK_USED);
+	return;
+    }
+
+    /* 本次最多可賺＝本次支出＋今天剩下的 Quota；超過的部分直接不給 */
+    cap = g_ticket.visit_spent + (CHICKEN_DAILY_QUOTA - g_ticket.quota_used);
+    give = calc > cap ? cap : calc;
+    g_ticket.given = give;
+    ticket_duration(dur, sizeof(dur), g_ticket.endgame - g_ticket.start);
+    if (calc > cap)
+	log_filef(CHICKENLOG, LOG_CREAT,
+		  "%s 的%s %s 玩球 %s，等級次數算出 %d，數字正確，實給 %d (未發放)\n",
+		  cuser.userid, chicken_type[(int)c->type], c->name,
+		  dur, calc, give);
+    else
+	log_filef(CHICKENLOG, LOG_CREAT,
+		  "%s 的%s %s 玩球 %s，得到 %d 元，其中直球 Excellent %d 個、曲球 Excellent %d 個 (未發放)\n",
+		  cuser.userid, chicken_type[(int)c->type], c->name,
+		  dur, give, cc, f);
+    ticket_finish(TK_USED);
+}
+/* ---- end MtBBS-App 丟球票 ---- */
 
 static void
 show_chicken_picture(const char *fpath)
@@ -224,7 +462,7 @@ new_chicken(void)
 	vmsg("錢不夠了。");
 	return 0;
     }
-    pay(price, "寵物蛋");
+    ch_pay(price, "寵物蛋");
 
     // flush it
     setuserfile(fn, FN_CHICKEN);
@@ -252,21 +490,31 @@ show_chicken_stat(const chicken_t * thechicken, int age)
 {
     struct tm ptime;
     char hp_buf[STRLEN];
+    char tkbuf[64] = "";
+    int tklen = 0, pad;
 
     // line 1: status
     // line 2: buff
     // line 3: debuff
 
     localtime4_r(&thechicken->birthday, &ptime);
+    // MilkTea: MtBBS-App connections see the ticket id after the pet type
+    if (ticket_active()) {
+	snprintf(tkbuf, sizeof(tkbuf), " " ANSI_COLOR(36) "%s" ANSI_RESET, g_ticket.id);
+	tklen = 1 + (int)strlen(g_ticket.id);
+    }
+    pad = (int)(30 - strlen(thechicken->name) -
+		strlen(chicken_type[(int)thechicken->type]) - tklen);
+    if (tklen && pad < 1)
+	pad = 1;
     prints("名字: " ANSI_COLOR(33) "%s" ANSI_RESET
-           " (" ANSI_COLOR(32) "%s" ANSI_RESET ")%*s"
+           " (" ANSI_COLOR(32) "%s" ANSI_RESET ")%s%*s"
            "生日:" ANSI_COLOR(33) "%d" ANSI_RESET "年"
            ANSI_COLOR(33) "%d" ANSI_RESET "月"
            ANSI_COLOR(33) "%d" ANSI_RESET "日 "
 	   "(" ANSI_COLOR(32) "%s %d歲" ANSI_RESET ")\n",
 	   thechicken->name, chicken_type[(int)thechicken->type],
-           (int)(30 - strlen(thechicken->name) -
-            strlen(chicken_type[(int)thechicken->type])),
+           tkbuf, pad,
            "", ptime.tm_year + 1900, ptime.tm_mon + 1, ptime.tm_mday,
 	   cage[age > 16 ? 16 : age], age);
 
@@ -482,7 +730,7 @@ ch_buyitem(int money, const char *picture, int *item, chicken_t *mychicken GCC_U
     reload_money();
     if (cuser.money/money >= num) {
 	*item += num;
-        pay(money * num, "寵物商店");
+        ch_pay(money * num, "寵物商店");
 	show_chicken_picture(picture);
         pressanykey();
     } else {
@@ -528,7 +776,7 @@ ch_kill(chicken_t *mychicken)
     ans = vans("棄養要被罰 100 元, 是否要棄養?(y/N)");
     if (ans == 'y') {
 
-	pay(100, "棄養寵物費");
+	ch_pay(100, "棄養寵物費");
 	more(CHICKEN_PIC "/deadth", YEA);
 	log_filef(CHICKENLOG, LOG_CREAT,
 		 ANSI_COLOR(31) "%s " ANSI_RESET "把 "
@@ -947,7 +1195,7 @@ recover_chicken(chicken_t * thechicken)
         return 0;
     }
 
-    pay(money, "靈界守衛");
+    ch_pay(money, "靈界守衛");
     revive_chicken(thechicken, 0);
     move(12, 0);
     prints("寵物已復活。 請記得加以餵食避免再度死亡。\n"
@@ -1074,6 +1322,7 @@ chicken_main(void)
     chicken_t safe;
     int has_safe = 0, sysop_rescue, cause;
     lockreturn0(CHICKEN, LOCK_MULTI);
+    ticket_issue();
     mychicken = load_live_chicken(cuser.userid);
     debug_timediff(mychicken);
     if (mychicken && !mychicken->name[0])
@@ -1093,6 +1342,7 @@ chicken_main(void)
 	// exit if still no valid data.
 	if (!mychicken || !mychicken->name[0])
 	{
+	    ticket_finish(TK_VOID);
 	    unlockutmpmode();
 	    free_live_chicken(mychicken);
 	    return 0;
@@ -1125,6 +1375,11 @@ chicken_main(void)
     // MilkTea: leaving while alive -> remember how the owner last saw it
     if (mychicken->name[0])
 	save_last_seen(cuser.userid, mychicken);
+    // MilkTea: MtBBS-App tickets. Wait at a blank input line for the App's report.
+    if (mychicken->name[0])
+	ticket_leave(mychicken);
+    else
+	ticket_finish(TK_VOID);
     unlockutmpmode();
     free_live_chicken(mychicken);
     return 0;
