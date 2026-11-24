@@ -36,6 +36,7 @@ static void getremotename(const struct in_addr from, char *rhost);
 
 static int listen_port;
 static int is_secure_connection;
+static int login_source;    // LOGIN_SRC_*, kept for the whole connection
 
 #define MAX_BINDPORT 20
 enum TermMode {
@@ -1120,6 +1121,77 @@ check_bad_clients(void) {
     vmsg("謝謝您的合作。如果您想提供更多資訊歡迎至" BN_BUGREPORT "報告");
 }
 
+// count logins by source in the user's .milktea (key=value, one line per key)
+static void milktea_count_login(void)
+{
+    static const char *names[] = { "unknown", "telnet", "gateway", "app" };
+    char fn[PATHLEN], key[32], line[96], *buf, *p, *q;
+    int src = login_source, fd, n, klen, found = 0;
+    long cnt = 0;
+    size_t total = 0, cap = 2048;
+
+    if (src < 0 || src > 3)
+	src = 0;
+    snprintf(key, sizeof(key), "login.%s=", names[src]);
+    klen = strlen(key);
+
+    setuserfile(fn, ".milktea");
+    fd = open(fn, O_RDWR | O_CREAT, 0644);
+    if (fd < 0)
+	return;
+    if (flock(fd, LOCK_EX) < 0) {
+	close(fd);
+	return;
+    }
+    buf = (char *)malloc(cap + 128);
+    if (!buf) {
+	close(fd);
+	return;
+    }
+    n = read(fd, buf, cap);
+    if (n < 0 || n >= (int)cap - 1) {
+	// too big or unreadable: leave the file alone
+	free(buf);
+	close(fd);
+	return;
+    }
+    buf[n] = 0;
+    total = n;
+
+    // find our own line
+    for (p = buf; *p; p = q) {
+	q = strchr(p, '\n');
+	q = q ? q + 1 : p + strlen(p);
+	if (strncmp(p, key, klen) == 0) {
+	    cnt = atol(p + klen);
+	    snprintf(line, sizeof(line), "%s%ld\n", key, cnt + 1);
+	    memmove(p + strlen(line), q, strlen(q) + 1);
+	    memcpy(p, line, strlen(line));
+	    found = 1;
+	    break;
+	}
+    }
+    if (!found) {
+	snprintf(line, sizeof(line), "%s1\n", key);
+	if (total > 0 && buf[total - 1] != '\n')
+	    buf[total++] = '\n';
+	memcpy(buf + total, line, strlen(line));
+	total += strlen(line);
+	buf[total] = 0;
+    }
+    total = strlen(buf);
+    if (lseek(fd, 0, SEEK_SET) == 0 && write(fd, buf, total) == (ssize_t)total)
+	(void)ftruncate(fd, total);
+    free(buf);
+    flock(fd, LOCK_UN);
+    close(fd);
+}
+
+int mbbsd_login_source(void)
+{
+    return login_source;
+}
+
 static void append_log_recent_login()
 {
     char buf[STRLEN], logfn[PATHLEN];
@@ -1241,6 +1313,7 @@ user_login(void)
 	welcome_msg();
 
 	append_log_recent_login();
+	milktea_count_login();
 	check_bad_login();
 #ifdef USE_CHECK_BAD_CLIENTS
         check_bad_clients();
@@ -1982,6 +2055,7 @@ tunnel_login(char *argv0, struct ProgramOption *option)
     option->term_width  = dat.t_cols;
     option->term_height = dat.t_lines;
     is_secure_connection = (dat.flags & CONN_FLAG_SECURE);
+    login_source = (int)dat.client_kind;
 
 #ifdef CONVERT
     if (dat.encoding)

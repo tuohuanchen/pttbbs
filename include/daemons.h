@@ -79,7 +79,18 @@ typedef struct login_data
     // connection information
     uint32_t flags;
 
+    // client kind reported by telnet TTYPE (LOGIN_SRC_*)
+    uint32_t client_kind;
+
 }   login_data;
+
+// login source, identified by the telnet terminal-type string
+enum {
+    LOGIN_SRC_UNKNOWN = 0,  // no TTYPE answer
+    LOGIN_SRC_TELNET  = 1,  // any other terminal type
+    LOGIN_SRC_GATEWAY = 2,  // "MtBBS-Gateway"
+    LOGIN_SRC_APP     = 3,  // "MtBBS-App"
+};
 
 typedef struct conn_data
 {

@@ -217,6 +217,7 @@ typedef struct {
     int  icurr;         // cursor (only available in userid input mode)
     Fnv32_t client_code;
     int  is_secure_connection;
+    int  client_kind;   // LOGIN_SRC_*, from telnet TTYPE
     char userid [IDBOXLEN];
     char pad0;   // for safety
     char passwd [PASSLEN+1];
@@ -611,6 +612,30 @@ _telnet_resize_term_cb(void *resize_arg, int w, int h)
     ctx->t_cols  = w;
 }
 
+// Identify the client by its telnet terminal type (first answer only).
+static int
+classify_client_ttype(const char *s, int len)
+{
+    if (len <= 0 || !*s)
+        return LOGIN_SRC_UNKNOWN;
+    if (len >= 9  && strncasecmp(s, "MtBBS-App", 9) == 0)
+        return LOGIN_SRC_APP;
+    if (len >= 13 && strncasecmp(s, "MtBBS-Gateway", 13) == 0)
+        return LOGIN_SRC_GATEWAY;
+    return LOGIN_SRC_TELNET;
+}
+
+static void
+_telnet_ttype_cb(void *ttype_arg, char *ttype, int ttype_len)
+{
+    login_ctx *ctx = (login_ctx*) ttype_arg;
+    assert(ctx);
+    // only trust the first answer; later ones (cycling) are ignored
+    if (ctx->client_kind != LOGIN_SRC_UNKNOWN)
+        return;
+    ctx->client_kind = classify_client_ttype(ttype, ttype_len);
+}
+
 #ifdef DETECT_CLIENT
 static void 
 _telnet_update_cc_cb(void *cc_arg, unsigned char c)
@@ -671,6 +696,8 @@ telnet_callback = {
 #else
     NULL,
 #endif
+
+    _telnet_ttype_cb,
 };
 
 ///////////////////////////////////////////////////////////////////////
@@ -1653,6 +1680,7 @@ start_service(int fd, login_conn_ctx *conn)
     strlcpy(ld.port,   ctx->port,   sizeof(ld.port));
     ld.encoding = ctx->encoding;
     ld.client_code = ctx->client_code;
+    ld.client_kind = ctx->client_kind;
     ld.t_lines  = 24;   // default size
     ld.t_cols   = 80;
     if (ctx->t_lines > ld.t_lines)
@@ -2409,6 +2437,7 @@ listen_cb(int lfd, short event GCC_UNUSED, void *arg)
         telnet_ctx_init(&conn->telnet, &telnet_callback, fd);
         telnet_ctx_set_write_arg (&conn->telnet, (void*) conn); // use conn for buffered events
         telnet_ctx_set_resize_arg(&conn->telnet, (void*) &conn->ctx);
+        telnet_ctx_set_ttype_arg (&conn->telnet, (void*) &conn->ctx);
 #ifdef DETECT_CLIENT
         telnet_ctx_set_cc_arg(&conn->telnet, (void*) &conn->ctx);
 #endif
