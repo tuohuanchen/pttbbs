@@ -41,6 +41,16 @@ reset_garbage(void)
      */
 }
 
+// MilkTea: like keeplog(), but posts nothing if the source file is missing or empty.
+static void keeplog(const char *fpath, const char *board, const char *title, const char *sym);
+static void
+keeplog_nonempty(const char *fpath, const char *board, const char *title, const char *sym)
+{
+    if (dashs(fpath) <= 0)
+	return;
+    keeplog(fpath, board, title, sym);
+}
+
 static void
 keeplog(const char *fpath, const char *board, const char *title, const char *sym)
 {
@@ -413,9 +423,9 @@ main(/*int argc, char **argv*/)
 	/* system("rm -f note.dat"); */
 
 	keeplog("etc/today", BN_RECORD, "上站人次統計", NULL);
-	keeplog(FN_MONEY, BN_SECURITY, "本日金錢往來記錄", NULL);
-	keeplog("etc/illegal_money", BN_SECURITY, "本日違法賺錢記錄", NULL);
-	keeplog("etc/osong.log", BN_SECURITY, "本日點歌記錄", NULL);
+	keeplog_nonempty(FN_MONEY, BN_SECURITY, "本日金錢往來記錄", NULL);
+	keeplog_nonempty("etc/illegal_money", BN_SECURITY, "本日違法賺錢記錄", NULL);
+	keeplog_nonempty("etc/osong.log", BN_SECURITY, "本日點歌記錄", NULL);
 	keeplog("etc/chicken", BN_RECORD, "雞場報告", NULL);
 
         // Restore etc/yesterday because keeplog removes it.

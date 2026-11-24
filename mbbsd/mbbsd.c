@@ -1293,7 +1293,9 @@ user_login(void)
 	SHM->max_time = now;
     }
 
-    if (!(HasUserPerm(PERM_SYSOP) && HasUserPerm(PERM_SYSOPHIDE)) &&
+    // MilkTea: retired sysop (PERM_OLDSYSOP) with purple-hide must not announce either
+    if (!((HasUserPerm(PERM_SYSOP) || HasUserPerm(PERM_OLDSYSOP)) &&
+	  HasUserPerm(PERM_SYSOPHIDE)) &&
         !HasUserRole(ROLE_HIDE_FROM) && !currutmp->invisible) {
 	/* do_aloha is costly. do it later? And don't alert if previous
          * login was just minutes ago... */

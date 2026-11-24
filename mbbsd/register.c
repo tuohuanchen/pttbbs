@@ -797,6 +797,9 @@ new_register(void)
 			minute / (60 * 24) + 1);
 	    }
 	}
+	// MilkTea: an existing board with the same name (case-insensitive) blocks the id
+	else if (getbnum(passbuf) > 0)
+	    outs("此代號已有同名看板，無法提供同名帳號，請使用別的代號\n");
 	else if (reserved_user_id(passbuf))
 	    outs("此代號已由系統保留，請使用別的代號\n");
 #if !defined(NO_CHECK_AMBIGUOUS_USERID) && defined(USE_REGCHECKD)
