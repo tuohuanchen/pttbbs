@@ -2764,13 +2764,15 @@ do_add_recommend(const char *direct, fileheader_t *fhdr,
     return -1;
 }
 
-/* 作者一日一推 (milktea)
- * 紀錄檔: 使用者 home 目錄下的 selfpush, 每行 "YYYYMMDD 看板 檔名"
- * 寫入時只保留今天的紀錄, 檔案不會越長越大 */
-#define FN_SELFPUSH "selfpush"
+/* 全站每日一推 (milktea)
+ * 每個人對每一篇文章, 一天只能「推」一次、「噓」一次 (推噓各算各的).
+ * 紀錄檔: 使用者 home 目錄下的 dailypush,
+ *         每行 "YYYYMMDD 看板 檔名 G|B"  (G=推, B=噓)
+ * 寫入時只保留今天的紀錄, 檔案不會越長越大; 隔日自動重新開始 */
+#define FN_DAILYPUSH "dailypush"
 
 static void
-selfpush_today(char *out, size_t sz)
+dailypush_today(char *out, size_t sz)
 {
     time_t t = (time_t)now;
     struct tm *tm = localtime(&t);
@@ -2778,23 +2780,29 @@ selfpush_today(char *out, size_t sz)
 	     tm->tm_year + 1900, tm->tm_mon + 1, tm->tm_mday);
 }
 
+static char
+dailypush_code(int type)
+{
+    return (type == RECTYPE_BAD) ? 'B' : 'G';
+}
+
 static int
-selfpush_done_today(const char *brdname, const char *fname)
+dailypush_done_today(const char *brdname, const char *fname, int type)
 {
     char path[PATHLEN], line[STRLEN], today[16];
-    char d[16], b[64], f[64];
+    char d[16], b[64], f[64], k[4];
     FILE *fp;
     int found = 0;
 
-    selfpush_today(today, sizeof(today));
-    setuserfile(path, FN_SELFPUSH);
+    dailypush_today(today, sizeof(today));
+    setuserfile(path, FN_DAILYPUSH);
     if (!(fp = fopen(path, "r")))
 	return 0;
     while (fgets(line, sizeof(line), fp)) {
-	if (sscanf(line, "%15s %63s %63s", d, b, f) != 3)
+	if (sscanf(line, "%15s %63s %63s %3s", d, b, f, k) != 4)
 	    continue;
 	if (strcmp(d, today) == 0 && strcmp(b, brdname) == 0 &&
-	    strcmp(f, fname) == 0) {
+	    strcmp(f, fname) == 0 && k[0] == dailypush_code(type)) {
 	    found = 1;
 	    break;
 	}
@@ -2804,15 +2812,15 @@ selfpush_done_today(const char *brdname, const char *fname)
 }
 
 static void
-selfpush_record(const char *brdname, const char *fname)
+dailypush_record(const char *brdname, const char *fname, int type)
 {
     char path[PATHLEN], tmp[PATHLEN], line[STRLEN], today[16];
     size_t tl;
     FILE *in, *out;
 
-    selfpush_today(today, sizeof(today));
+    dailypush_today(today, sizeof(today));
     tl = strlen(today);
-    setuserfile(path, FN_SELFPUSH);
+    setuserfile(path, FN_DAILYPUSH);
     snprintf(tmp, sizeof(tmp), "%s.%d", path, (int)getpid());
     if (!(out = fopen(tmp, "w")))
 	return;
@@ -2822,7 +2830,8 @@ selfpush_record(const char *brdname, const char *fname)
 		fputs(line, out);
 	fclose(in);
     }
-    fprintf(out, "%s %s %s\n", today, brdname, fname);
+    fprintf(out, "%s %s %s %c\n", today, brdname, fname,
+	    dailypush_code(type));
     fclose(out);
     if (rename(tmp, path) < 0)
 	unlink(tmp);
@@ -2855,7 +2864,9 @@ recommend(int ent, fileheader_t * fhdr, const char *direct)
     static char lastrecommend_fname[FNLEN] = "";
     int isGuest = (strcmp(cuser.userid, STR_GUEST) == EQUSTR);
     int logIP = 0;
-    int is_selfpush = 0;
+    int record_kind = -1;	/* 推/噓送出後要記入每日一推的種類, -1 = 不記 */
+    // 站長與退休站長: 可再推(噓), 且不受連推限制
+    const int privileged = HasUserPerm(PERM_SYSOP) || HasUserPerm(PERM_OLDSYSOP);
     int ymsg = b_lines -1;
     const char *reason = "權限不足";
 
@@ -2908,9 +2919,9 @@ recommend(int ent, fileheader_t * fhdr, const char *direct)
 #endif
 
     aligncmt = (bp->brdattr & BRD_ALIGNEDCMT) ? 1 : 0;
-    if((currmode & MODE_BOARD) || HasUserPerm(PERM_SYSOP))
+    if((currmode & MODE_BOARD) || privileged)
     {
-	/* I'm BM or SYSOP. */
+	/* I'm BM or SYSOP (or retired SYSOP). */
     }
     else if (bp->brdattr & BRD_NOFASTRECMD)
     {
@@ -2979,27 +2990,27 @@ recommend(int ent, fileheader_t * fhdr, const char *direct)
     if (fhdr->recommend == 0 && is_file_owner(fhdr, &cuser))
 #endif
     {
-	// owner recommend: 作者一日一推, 站長可選擇再推 (milktea)
+	// owner recommend: 作者一日一推, 站長與退休站長可選擇再推 (milktea)
 	const char *selfmsg;
 
-	if (!selfpush_done_today(bp->brdname, fhdr->filename)) {
+	if (!dailypush_done_today(bp->brdname, fhdr->filename, RECTYPE_GOOD)) {
 	    type = RECTYPE_GOOD;
-	    is_selfpush = 1;
+	    record_kind = RECTYPE_GOOD;
 	    selfmsg = "作者本人, 今天可推自己的文章一次\n";
-	} else if (HasUserPerm(PERM_SYSOP) &&
+	} else if (privileged &&
 		   vans("今天已推過此文, 仍要推文嗎？ [y/N]: ") == 'y') {
 	    type = RECTYPE_GOOD;
-	    is_selfpush = 1;
+	    record_kind = RECTYPE_GOOD;
 	    selfmsg = "站長特權, 再推一次\n";
 	} else {
 	    type = RECTYPE_ARROW;
-	    selfmsg = "自己的文章一天只能推一次, 使用 → 加註方式\n";
+	    selfmsg = "每篇文章一天只能推一次, 使用 → 加註方式\n";
 	}
 	move(ymsg--, 0); clrtoeol();
 	outs(selfmsg);
     }
 #ifndef DEBUG
-    else if (!(currmode & MODE_BOARD) &&
+    else if (!(currmode & MODE_BOARD) && !privileged &&
 	    (now - lastrecommend) < (
 #if 0
 	    /* i'm not sure whether this is better or not */
@@ -3019,6 +3030,14 @@ recommend(int ent, fileheader_t * fhdr, const char *direct)
     else
     {
 	int i;
+
+	// 全站每日一推 (milktea): 今天推、噓都還沒用過, 先在問句上面一行提示
+	if (!dailypush_done_today(bp->brdname, fhdr->filename, RECTYPE_GOOD) &&
+	    !dailypush_done_today(bp->brdname, fhdr->filename, RECTYPE_BAD))
+	{
+	    move(ymsg--, 0); clrtoeol();
+	    outs("今日首推, 今日可推(噓)別人的文章一次\n");
+	}
 
 	move(b_lines, 0); clrtoeol();
 	outs(ANSI_COLOR(1)  "您覺得這篇文章 ");
@@ -3051,6 +3070,36 @@ recommend(int ent, fileheader_t * fhdr, const char *direct)
 	assert(type >= 0 && type <= RECTYPE_MAX);
 
 	move(b_lines, 0); clrtoeol();
+
+	// 全站每日一推 (milktea): 推、噓各一次; 用過了改成 → 加註,
+	// 站長與退休站長可選擇再推(噓)一次
+	if (type == RECTYPE_GOOD || type == RECTYPE_BAD)
+	{
+	    const int is_good = (type == RECTYPE_GOOD);
+	    const char *kindmsg;
+
+	    if (!dailypush_done_today(bp->brdname, fhdr->filename, type)) {
+		record_kind = type;
+		kindmsg = NULL;
+	    } else if (privileged &&
+		       vans(is_good ?
+			    "今天已推過此文, 仍要推文嗎？ [y/N]: " :
+			    "今天已噓過此文, 仍要噓文嗎？ [y/N]: ") == 'y') {
+		record_kind = type;
+		kindmsg = is_good ?
+		    "站長特權, 再推一次\n" : "站長特權, 再噓一次\n";
+	    } else {
+		type = RECTYPE_ARROW;
+		kindmsg = is_good ?
+		    "每篇文章一天只能推一次, 使用 → 加註方式\n" :
+		    "每篇文章一天只能噓一次, 使用 → 加註方式\n";
+	    }
+	    if (kindmsg) {
+		move(b_lines, 0); clrtoeol();
+		move(ymsg--, 0); clrtoeol();
+		outs(kindmsg);
+	    }
+	}
     }
 #endif
 
@@ -3182,8 +3231,8 @@ recommend(int ent, fileheader_t * fhdr, const char *direct)
     if (do_add_recommend(direct, fhdr,  ent, buf, type) < 0)
         return DIRCHANGED;
 
-    if (is_selfpush)
-	selfpush_record(bp->brdname, fhdr->filename);
+    if (record_kind >= 0)
+	dailypush_record(bp->brdname, fhdr->filename, record_kind);
 
     lastrecommend = now;
     strlcpy(lastrecommend_fname, fhdr->filename, sizeof(lastrecommend_fname));
